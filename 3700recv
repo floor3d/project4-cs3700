@@ -1,0 +1,100 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+
+
+
+class Receiver:
+    def __init__(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('0.0.0.0', 0))
+        self.port = self.socket.getsockname()[1]
+        self.log("Bound to port %d" % self.port)
+
+        self.remote_host = None
+        self.remote_port = None
+
+        #running list of packets. used to reorder disordered packets
+        self.window = []
+
+        self.recvd_seqs = []
+
+
+    def send(self, message):
+        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
+
+    def log(self, message):
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+
+    def run(self):
+        while True:
+            socks = select.select([self.socket], [], [])[0]
+            for conn in socks:
+                data, addr = conn.recvfrom(65535)
+
+                # Grab the remote host/port if we don't already have it
+                if self.remote_host is None:
+                    self.remote_host = addr[0]
+                    self.remote_port = addr[1]
+
+                msg = json.loads(data.decode('utf-8'))
+                self.handleMsg(msg)
+
+
+        return
+
+
+    def handleMsg(self, msg):
+        self.log("Received data message %s" % msg)
+        data = msg["data"]
+        seq_num = msg["seq_num"]
+
+        if(seq_num in self.recvd_seqs):
+            msg2 = "Duplicate sequence number [{}] found. Trashing.".format(seq_num)
+            self.log(msg2)
+        else: 
+            
+            if(len(self.recvd_seqs) == 0):
+                self.printMessage(msg)
+                self.update_window()
+
+
+            elif(len(self.recvd_seqs) > 0):
+                recent_seq = self.recvd_seqs[len(self.recvd_seqs) - 1]
+                if(recent_seq + 1 != seq_num):
+                    self.window.append(msg)
+                else:
+                    self.printMessage(msg)
+                    self.update_window()
+
+
+
+    def update_window(self):
+        self.window.sort(key=lambda x: x["seq_num"])
+        toRemove = []
+        for i in range(len(self.window)):
+            recent_seq = self.recvd_seqs[len(self.recvd_seqs) - 1]
+            current = self.window[i]
+            if(current["seq_num"] - 1 == recent_seq):
+                toRemove.append(i)
+                self.printMessage(current)
+        for i in toRemove[::-1]:
+            self.window.pop(i)
+            
+
+
+    def printMessage(self, msg):
+        seq_num = msg["seq_num"]
+        # Print out the data to stdout
+        print(msg["data"], end='', flush=True)
+        # send back an ack, log sequence number
+        self.send({ "type": "ack", "seq_num": seq_num })
+        self.recvd_seqs.append(seq_num)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='receive data')
+    args = parser.parse_args()
+    sender = Receiver()
+    sender.run()

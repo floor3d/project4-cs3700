@@ -1,0 +1,80 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+
+DATA_SIZE = 1375
+SEQ_SIZE = 4
+
+class Sender:
+    def __init__(self, host, port):
+        self.host = host
+        self.remote_port = int(port)
+        self.log("Sender starting up using port %s" % self.remote_port)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(('0.0.0.0', 0))
+        self.waiting = False
+        #initialize advertised window. this lets multiple packets be in transit on the network at once
+        self.adv_window = 4
+        self.sent_msgs = {}
+        self.acked_msgs = []
+    def log(self, message):
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+
+    def send(self, message):
+        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+
+    def run(self):
+        # initialize sequence number. this will be used to check for lost or unordered packets
+        seq_num = 0
+        while True:
+            sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
+
+            socks = select.select(sockets, [], [], 0.1)[0]
+
+            for conn in socks:
+                if conn == self.socket:
+                    k, addr = conn.recvfrom(65535)
+                    msg = k.decode('utf-8')
+
+                    self.log("Received message '%s'" % msg)
+                    obj = json.loads(msg)
+                    if(obj["seq_num"] not in self.acked_msgs):
+                        self.acked_msgs.append(obj["seq_num"])
+                    self.waiting = False
+                elif conn == sys.stdin:
+                    if (seq_num - len(self.acked_msgs) > self.adv_window):
+                        self.waiting = True
+                        continue
+                    for i in range(self.adv_window):
+
+                        data = sys.stdin.read(DATA_SIZE)
+
+                        if len(data) == 0:
+                            last_seq_num = seq_num - 1
+                            if last_seq_num in self.acked_msgs:
+                                self.log("All done!")
+                                sys.exit(0)
+                            continue
+                        self.sendMsg(data, seq_num)
+                        seq_num += 1
+                    self.waiting = True
+
+        return
+
+
+    def sendMsg(self, data, seq_num):
+        msg = { "type": "msg", "data": data, "seq_num": seq_num }
+        self.log("Sending message '%s'" % msg)
+        self.sent_msgs[str(seq_num)] = msg
+        self.send(msg)
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='send data')
+    parser.add_argument('host', type=str, help="Remote host to connect to")
+    parser.add_argument('port', type=int, help="UDP port number to connect to")
+    args = parser.parse_args()
+    sender = Sender(args.host, args.port)
+    sender.run()
