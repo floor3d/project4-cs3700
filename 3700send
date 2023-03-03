@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -u
+from datetime import datetime
 
-import argparse, socket, time, json, select, struct, sys, math
-
+import argparse, socket, time, json, select, struct, sys, math, time
 DATA_SIZE = 1375
 SEQ_SIZE = 4
 
@@ -17,6 +17,7 @@ class Sender:
         self.adv_window = 4
         self.sent_msgs = {}
         self.acked_msgs = []
+        self.rtt = 1
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
@@ -29,46 +30,86 @@ class Sender:
         seq_num = 0
         while True:
             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
-
+            
             socks = select.select(sockets, [], [], 0.1)[0]
+
+            print("we at while true\r\n", end='', flush=True)
+            print("self.waiting is %r\r\n" % self.waiting, end='', flush=True)
+            if(len(socks) == 0):
+                #time.sleep(2 * self.rtt)
+                self.checkForDroppedPackets()
+                self.waiting = True
+
 
             for conn in socks:
                 if conn == self.socket:
+                    print("time 2 listen", end='', flush=True)
+                    conn.settimeout(.5)
                     k, addr = conn.recvfrom(65535)
+                    print("finished recvfrom", end='', flush=True)
+                    conn.settimeout(None)
                     msg = k.decode('utf-8')
 
                     self.log("Received message '%s'" % msg)
                     obj = json.loads(msg)
-                    if(obj["seq_num"] not in self.acked_msgs):
-                        self.acked_msgs.append(obj["seq_num"])
+                    if(int(obj["seq_num"]) not in self.acked_msgs):
+                        self.acked_msgs.append(int(obj["seq_num"]))
+                    print("gonna call check 4 dropped packets", end='', flush=True)
+                    self.checkForDroppedPackets()
                     self.waiting = False
                 elif conn == sys.stdin:
-                    if (seq_num - len(self.acked_msgs) > self.adv_window):
-                        self.waiting = True
-                        continue
+                    print("at 2nd part of big iffer", end='', flush=True)
+                    self.waiting = True
                     for i in range(self.adv_window):
 
+                        if (seq_num - len(self.acked_msgs) > self.adv_window):
+                            print("I shall set myself to waiting in if", end='', flush=True)
+                            self.waiting = True
+                            break
                         data = sys.stdin.read(DATA_SIZE)
 
                         if len(data) == 0:
+                            print("len data is 0", end='', flush=True)
                             last_seq_num = seq_num - 1
                             if last_seq_num in self.acked_msgs:
                                 self.log("All done!")
                                 sys.exit(0)
+                            time.sleep(2 * self.rtt)
+                            self.checkForDroppedPackets()
                             continue
                         self.sendMsg(data, seq_num)
                         seq_num += 1
+                        #self.checkForDroppedPackets()
+                    print("I shall set myself to waiting outside of for", end='', flush=True)
                     self.waiting = True
+                    self.checkForDroppedPackets()
 
         return
 
 
     def sendMsg(self, data, seq_num):
-        msg = { "type": "msg", "data": data, "seq_num": seq_num }
-        self.log("Sending message '%s'" % msg)
+        msg = { "type": "msg", "data": data, "seq_num": int(seq_num), "time": str(datetime.now()) }
+       # self.log("Sending message '%s'" % msg)
+        self.log("Sending message '%d'" % msg["seq_num"])
         self.sent_msgs[str(seq_num)] = msg
         self.send(msg)
 
+   
+    def checkForDroppedPackets(self):
+        print("Checking for dropped packets", end='', flush=True)
+        for seq_num in self.sent_msgs:
+            #if packet is NOT in acked msgs AND more than 2 * RTT overdue, resend it
+            # and get rid of old sent packet for accounting purposes
+            msg = self.sent_msgs[seq_num]
+            #msg2 = "checking msg %s" % seq_num
+            #print(msg2, end='', flush=True)
+            #print(str(self.acked_msgs), end='', flush=True)
+            if(int(seq_num) not in self.acked_msgs and (datetime.now() - datetime.strptime(msg["time"], "%Y-%m-%d %H:%M:%S.%f")).total_seconds() > 2 * self.rtt):
+                #print("sending message because it is not in acked msgs", end='', flush=True)
+                #print(self.acked_msgs, end='', flush=True)
+                self.sendMsg(msg["data"], seq_num)
+
+                # sent_msgs is a dictionary so it will be overwritten with new time
 
 
 if __name__ == "__main__":

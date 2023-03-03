@@ -3,7 +3,6 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 
-
 class Receiver:
     def __init__(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -41,42 +40,55 @@ class Receiver:
                 msg = json.loads(data.decode('utf-8'))
                 self.handleMsg(msg)
 
-
         return
 
 
     def handleMsg(self, msg):
-        self.log("Received data message %s" % msg)
+        #self.log("Received data message %s" % msg)
+        self.log("Received data message %d" % msg["seq_num"])
+        self.log("my current thangs are")
+        self.log(str(self.recvd_seqs))
         data = msg["data"]
-        seq_num = msg["seq_num"]
-
+        seq_num = int(msg["seq_num"])
+        
         if(seq_num in self.recvd_seqs):
             msg2 = "Duplicate sequence number [{}] found. Trashing.".format(seq_num)
             self.log(msg2)
+            self.send({ "type": "ack", "seq_num": seq_num })
+
         else: 
             
-            if(len(self.recvd_seqs) == 0):
+            if(len(self.recvd_seqs) == 0 and seq_num == 0):
+                #msg2 = "printing message %d" % seq_num
+                #self.log(msg2)
                 self.printMessage(msg)
-                self.update_window()
+                #self.update_window()
 
 
             elif(len(self.recvd_seqs) > 0):
-                recent_seq = self.recvd_seqs[len(self.recvd_seqs) - 1]
+                recent_seq = int(self.recvd_seqs[len(self.recvd_seqs) - 1])
+                self.log("The recent seq is %d" % recent_seq)
+                self.log("The current seq is %d" % seq_num)
                 if(recent_seq + 1 != seq_num):
                     self.window.append(msg)
+                    #msg2 = "appending to window %d" % seq_num
+                    #self.log(msg2)
+                    #self.log(str(self.window))
                 else:
                     self.printMessage(msg)
                     self.update_window()
+                    #msg2 = "printing messag %d" % seq_num
+                    #self.log(msg2)
 
 
 
     def update_window(self):
-        self.window.sort(key=lambda x: x["seq_num"])
+        self.window.sort(key=lambda x: int(x["seq_num"]))
         toRemove = []
         for i in range(len(self.window)):
             recent_seq = self.recvd_seqs[len(self.recvd_seqs) - 1]
             current = self.window[i]
-            if(current["seq_num"] - 1 == recent_seq):
+            if(int(current["seq_num"]) - 1 == recent_seq):
                 toRemove.append(i)
                 self.printMessage(current)
         for i in toRemove[::-1]:
@@ -89,6 +101,7 @@ class Receiver:
         # Print out the data to stdout
         print(msg["data"], end='', flush=True)
         # send back an ack, log sequence number
+        self.log("Sending sequence number %d" % seq_num)
         self.send({ "type": "ack", "seq_num": seq_num })
         self.recvd_seqs.append(seq_num)
 
