@@ -1,9 +1,8 @@
 #!/usr/bin/env -S python3 -u
 from datetime import datetime
 
-import argparse, socket, time, json, select, struct, sys, math, time
+import argparse, socket, time, json, select, struct, sys, math, hashlib
 DATA_SIZE = 1375
-SEQ_SIZE = 4
 
 class Sender:
     def __init__(self, host, port):
@@ -12,11 +11,15 @@ class Sender:
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
+        #beginning state is sending, not receiving
         self.waiting = False
         #initialize advertised window. this lets multiple packets be in transit on the network at once
         self.adv_window = 4
+        #our dictionary of messages we sent. we use this to resend messages that may have been dropped
         self.sent_msgs = {}
+        #list of messages we have received an ack for. tracks sequence numbers
         self.acked_msgs = []
+        #round trip time. this will change based on ack speed as packets are sent
         self.rtt = 1
     def log(self, message):
         sys.stderr.write(message + "\n")
@@ -33,83 +36,86 @@ class Sender:
             
             socks = select.select(sockets, [], [], 0.1)[0]
 
-            print("we at while true\r\n", end='', flush=True)
-            print("self.waiting is %r\r\n" % self.waiting, end='', flush=True)
             if(len(socks) == 0):
-                #time.sleep(2 * self.rtt)
+                #nothing found. let's see if there are any packets we haven't received an ack for
+                #that were sent a while ago (timeout: 2 * rtt)
                 self.checkForDroppedPackets()
                 self.waiting = True
 
-
             for conn in socks:
                 if conn == self.socket:
-                    print("time 2 listen", end='', flush=True)
                     conn.settimeout(.5)
                     k, addr = conn.recvfrom(65535)
-                    print("finished recvfrom", end='', flush=True)
                     conn.settimeout(None)
                     msg = k.decode('utf-8')
 
                     self.log("Received message '%s'" % msg)
-                    obj = json.loads(msg)
-                    if(int(obj["seq_num"]) not in self.acked_msgs):
-                        self.acked_msgs.append(int(obj["seq_num"]))
-                    print("gonna call check 4 dropped packets", end='', flush=True)
-                    self.checkForDroppedPackets()
+                    self.handleReceivedMsg(msg)
+                    #try to send now that we have received
                     self.waiting = False
                 elif conn == sys.stdin:
-                    print("at 2nd part of big iffer", end='', flush=True)
                     self.waiting = True
+                    #only send as many messages as are in our advertised window
+                    #we do not want to overwhelm the peer
                     for i in range(self.adv_window):
-
                         if (seq_num - len(self.acked_msgs) > self.adv_window):
-                            print("I shall set myself to waiting in if", end='', flush=True)
+                            #we have sent a lot of messages and haven't received an ack in a while
+                            #let's try to receive some so we dont overwhelm peer
                             self.waiting = True
                             break
                         data = sys.stdin.read(DATA_SIZE)
 
                         if len(data) == 0:
-                            print("len data is 0", end='', flush=True)
-                            last_seq_num = seq_num - 1
-                            if last_seq_num in self.acked_msgs:
+                            if len(self.sent_msgs) == len(self.acked_msgs):
+                                #we have received acks for all our sent msgs
                                 self.log("All done!")
                                 sys.exit(0)
-                            time.sleep(2 * self.rtt)
+                            #we have nothing left to send but havent received all the acks yet
+                            #check for dropped packets so we can resend them
                             self.checkForDroppedPackets()
                             continue
                         self.sendMsg(data, seq_num)
                         seq_num += 1
-                        #self.checkForDroppedPackets()
-                    print("I shall set myself to waiting outside of for", end='', flush=True)
                     self.waiting = True
                     self.checkForDroppedPackets()
-
         return
 
-
+    #crafts and sends data message to peer
     def sendMsg(self, data, seq_num):
-        msg = { "type": "msg", "data": data, "seq_num": int(seq_num), "time": str(datetime.now()) }
+        msg = { "type": "msg", "data": data, "seq_num": int(seq_num), "time": str(datetime.now()), "hash": "x"}
+        msg["hash"] = hashlib.md5(str(msg["data"]).encode()).hexdigest()
        # self.log("Sending message '%s'" % msg)
         self.log("Sending message '%d'" % msg["seq_num"])
         self.sent_msgs[str(seq_num)] = msg
         self.send(msg)
 
-   
+    # see if any packets that were sent have exceeded timeout before we received an ack (2 * rtt)
     def checkForDroppedPackets(self):
-        print("Checking for dropped packets", end='', flush=True)
         for seq_num in self.sent_msgs:
             #if packet is NOT in acked msgs AND more than 2 * RTT overdue, resend it
             # and get rid of old sent packet for accounting purposes
             msg = self.sent_msgs[seq_num]
-            #msg2 = "checking msg %s" % seq_num
-            #print(msg2, end='', flush=True)
-            #print(str(self.acked_msgs), end='', flush=True)
             if(int(seq_num) not in self.acked_msgs and (datetime.now() - datetime.strptime(msg["time"], "%Y-%m-%d %H:%M:%S.%f")).total_seconds() > 2 * self.rtt):
-                #print("sending message because it is not in acked msgs", end='', flush=True)
-                #print(self.acked_msgs, end='', flush=True)
+                # packet has exceeded timeout with no ack. resend
                 self.sendMsg(msg["data"], seq_num)
+                if(self.adv_window >= 3):
+                    self.adv_window = self.adv_window // 2
 
-                # sent_msgs is a dictionary so it will be overwritten with new time
+    # handler for received acks
+    def handleReceivedMsg(self, msg):
+        try:
+            obj = json.loads(msg)
+            # see if we can parse out data. otherwise this has been corrupted and must be dropped
+        except json.decoder.JSONDecodeError:
+            return
+        if(int(obj["seq_num"]) not in self.acked_msgs):
+            # we received a new ack. increase window to send more data (additive increase)
+            self.adv_window += 2
+            self.acked_msgs.append(int(obj["seq_num"]))
+            td = datetime.now() - datetime.strptime(self.sent_msgs[str(obj["seq_num"])]["time"], "%Y-%m-%d %H:%M:%S.%f")
+            self.rtt = td.total_seconds()
+        self.checkForDroppedPackets()
+
 
 
 if __name__ == "__main__":
