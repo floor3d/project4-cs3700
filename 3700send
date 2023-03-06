@@ -113,7 +113,9 @@ class Sender:
             self.adv_window += 2
             self.acked_msgs.append(int(obj["seq_num"]))
             td = datetime.now() - datetime.strptime(self.sent_msgs[str(obj["seq_num"])]["time"], "%Y-%m-%d %H:%M:%S.%f")
-            self.rtt = (self.rtt + td.total_seconds()) / 2
+            self.rtt = td.total_seconds()
+            if self.rtt >= 1.25:
+                self.rtt = 1.25
         self.checkForDroppedPackets()
 
 
